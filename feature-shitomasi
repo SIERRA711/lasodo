@@ -1,0 +1,171 @@
+import cv2
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import convolve2d
+
+imagepath = input("Enter the path to the image: ")
+# Load the image
+image = cv2.imread(imagepath)
+output_directory = os.path.dirname(imagepath)
+gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+def shi_tomasi(img, patch_size):
+    
+    # Define Sobel filters for gradient calculation in x and y directions
+    sobel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
+    sobel_y = np.array([[1, 2, 1], [0, 0, 0], [-1, -2, -1]])
+
+    # Compute image gradients in x and y directions
+    Ix = convolve2d(img, sobel_x, mode='valid')
+    Iy = convolve2d(img, sobel_y, mode='valid')
+
+    # Compute the products of derivatives
+    Ixx = Ix ** 2
+    Iyy = Iy ** 2
+    Ixy = Ix * Iy
+
+    # Create a summation filter based on the patch size
+    summation_filter = np.ones((patch_size, patch_size))
+
+    # Convolve the derivative products with the summation filter to obtain the elements of matrix M
+    sum_Ixx = convolve2d(Ixx, summation_filter, mode='valid')
+    sum_Ixy = convolve2d(Ixy, summation_filter, mode='valid')
+    sum_Iyy = convolve2d(Iyy, summation_filter, mode='valid')
+
+    # Calculate the trace and determinant of M
+    trace = sum_Ixx + sum_Iyy
+    determinant = sum_Ixx * sum_Iyy - sum_Ixy ** 2
+
+    # Compute the Shi-Tomasi corner response (smallest eigenvalue of M)
+    scores = (trace / 2) - np.sqrt((trace / 2) ** 2 - determinant)
+    scores = np.maximum(scores, 0)  # Ensure non-negative scores
+
+    # Add padding to match the size of the original image
+    padding = patch_size // 2
+    padded_scores = np.pad(scores, padding, mode='constant')
+
+    return padded_scores
+    
+
+def select_n_keypoints(score_image, n_points, black_radius):
+    """
+    Selects the top `n_points` with the highest corner response in the `score_image`
+    and returns their x, y coordinates.
+
+    :param score_image: 2D array representing the corner response values.
+    :type score_image: np.ndarray
+    :param n_points: Number of keypoints to select.
+    :type n_points: int
+    :param black_radius: Radius around each selected point where responses are suppressed.
+    :type black_radius: int
+    :return: Tuple containing two arrays with the x and y coordinates of the selected points.
+    :rtype: Tuple[np.ndarray, np.ndarray]
+    """
+    
+    # Create a copy of the score image to avoid modifying the original
+    score_copy = score_image.copy()
+
+    # Initialize arrays to store the x and y coordinates of the keypoints
+    x_positions = np.zeros(n_points, dtype=int)
+    y_positions = np.zeros(n_points, dtype=int)
+
+    for i in range(n_points):
+        # Find the coordinates of the maximum value in the score image
+        y, x = np.unravel_index(np.argmax(score_copy), score_copy.shape)
+
+        # Store the coordinates
+        x_positions[i] = x
+        y_positions[i] = y
+
+        # Suppress the surrounding region to avoid selecting the same keypoint again
+        y_min = max(y - black_radius, 0)
+        y_max = min(y + black_radius, score_copy.shape[0])
+        x_min = max(x - black_radius, 0)
+        x_max = min(x + black_radius, score_copy.shape[1])
+
+        score_copy[y_min:y_max, x_min:x_max] = 0
+
+    return x_positions, y_positions
+
+def combine_features(score_image, edge_image, alpha=2):
+    """
+    Combines corner and edge features into a single score image.
+
+    :param score_image: 2D array with corner responses.
+    :type score_image: np.ndarray
+    :param edge_image: 2D binary array with edges detected.
+    :type edge_image: np.ndarray
+    :param alpha: Weight for the edge image in the combined score.
+    :type alpha: float
+    :return: 2D array with combined feature scores.
+    :rtype: np.ndarray
+    """
+    score_image = cv2.normalize(score_image, None, 0, 1, cv2.NORM_MINMAX)
+    edge_image = cv2.normalize(edge_image, None, 0, 1, cv2.NORM_MINMAX)
+    
+    # Combine with adjusted weight
+    combined_image = score_image + alpha * edge_image
+    
+    # Normalize again to make sure the values are in the right range
+    combined_image = cv2.normalize(combined_image, None, 0, 255, cv2.NORM_MINMAX)
+    
+    return combined_image
+
+def crop_to_match(smaller_img, larger_img):
+    """
+    Crops the larger image to match the dimensions of the smaller image.
+    
+    :param smaller_img: The smaller image (reference size).
+    :type smaller_img: np.ndarray
+    :param larger_img: The larger image to be cropped.
+    :type larger_img: np.ndarray
+    :return: Cropped version of the larger image.
+    :rtype: np.ndarray
+    """
+    smaller_shape = smaller_img.shape
+    larger_shape = larger_img.shape
+
+    start_y = (larger_shape[0] - smaller_shape[0]) // 2
+    start_x = (larger_shape[1] - smaller_shape[1]) // 2
+
+    cropped_img = larger_img[start_y:start_y + smaller_shape[0], start_x:start_x + smaller_shape[1]]
+    
+    return cropped_img
+
+
+def apply_gabor_filter(img, theta=0):
+    """
+    Applies Gabor filter to enhance linear features in a specific direction.
+
+    :param img: Grayscale image.
+    :type img: np.ndarray
+    :param theta: Orientation of the filter in radians.
+    :type theta: float
+    :return: Filtered image.
+    :rtype: np.ndarray
+    """
+    g_kernel = cv2.getGaborKernel((21, 21), 5.0, theta, 10.0, 0.5, 0, ktype=cv2.CV_32F)
+    filtered_img = cv2.filter2D(img, cv2.CV_8UC3, g_kernel)
+    return filtered_img
+
+gabor = apply_gabor_filter(gray_image, theta=np.pi/2)
+score_image = shi_tomasi(gray_image, 9)
+edges = cv2.Canny(gray_image,50,200)
+cropped_edges = crop_to_match(score_image, edges)
+combined_score = combine_features(score_image, cropped_edges)
+x_positions, y_positions = select_n_keypoints(combined_score, 500, 10)
+
+plt.figure()
+plt.imshow(score_image)
+plt.title('shi-tomasi')
+plt.figure()
+plt.imshow(edges)
+plt.title(' edge filter')
+plt.figure()
+plt.imshow(combined_score)
+plt.title('combined score')
+plt.figure()
+plt.imshow(gray_image)
+plt.scatter(x=x_positions, y=y_positions, c='r', s=100, marker='+')
+plt.show()
