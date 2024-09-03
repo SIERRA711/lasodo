@@ -1,0 +1,77 @@
+import cv2
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import convolve2d
+import matplotlib.colors as mcolors
+
+def orb_detector_descriptor(image, nfeatures=5000):
+    orb = cv2.ORB_create(nfeatures=nfeatures)
+    keypoints, descriptors = orb.detectAndCompute(image, None)
+    return keypoints, descriptors
+
+K = np.array([
+    [4085.11, 0, 3000],
+    [0, 4102.56, 2000],
+    [0, 0, 1]
+])
+
+# Image initializations
+ip1 = input("Enter the path to the image1: ")
+ip2 = input("Enter the path to the image2: ")
+im1 = cv2.imread(ip1)
+gi1 = cv2.cvtColor(im1, cv2.COLOR_BGR2GRAY)
+im2 = cv2.imread(ip2)
+gi2 = cv2.cvtColor(im2, cv2.COLOR_BGR2GRAY)
+
+k1, d1 = orb_detector_descriptor(gi1)
+k2, d2 = orb_detector_descriptor(gi2)
+
+# FLANN matcher
+FLANN_INDEX_LSH = 6
+index_params = dict(algorithm=FLANN_INDEX_LSH,
+                    table_number=6,
+                    key_size=12,
+                    multi_probe_level=1)
+search_params = dict(checks=50)
+flann = cv2.FlannBasedMatcher(index_params, search_params)
+matches = flann.knnMatch(d1, d2, k=2)
+
+# Apply ratio test
+good_matches = []
+for m, n in matches:
+    if m.distance < 0.7 * n.distance:
+        good_matches.append(m)
+
+# Draw matches
+img_matches = cv2.drawMatches(im1, k1, im2, k2, good_matches, None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
+
+# Find homography
+if len(good_matches) > 10:
+    src_pts = np.float32([k1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+    dst_pts = np.float32([k2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+    M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+
+    # Warp image
+    h, w = gi1.shape
+    pts = np.float32([[0, 0], [0, h-1], [w-1, h-1], [w-1, 0]]).reshape(-1, 1, 2)
+    dst = cv2.perspectiveTransform(pts, M)
+    im2_warped = cv2.warpPerspective(im1, M, (im2.shape[1], im2.shape[0]))
+
+    # Merge images
+    result = im2.copy()
+    mask = np.zeros(im2.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [np.int32(dst)], (255, 255, 255))
+    mask_inv = cv2.bitwise_not(mask)
+    result = cv2.bitwise_and(result, result, mask=mask_inv)
+    result = cv2.add(result, im2_warped)
+
+    # Display results
+    plt.figure(figsize=(20, 10))
+    plt.subplot(221), plt.imshow(cv2.cvtColor(im1, cv2.COLOR_BGR2RGB)), plt.title('Image 1')
+    plt.subplot(222), plt.imshow(cv2.cvtColor(im2, cv2.COLOR_BGR2RGB)), plt.title('Image 2')
+    plt.subplot(223), plt.imshow(cv2.cvtColor(img_matches, cv2.COLOR_BGR2RGB)), plt.title('Matching Keypoints')
+    plt.subplot(224), plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB)), plt.title('Merged Result')
+    plt.show()
+else:
+    print("Not enough good matches found.")
